@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ArcMatrix — Eisenhower Task Matrix &amp; Voice Assistant</title>
+    <meta name="description" content="Eisenhower Matrix task planner with drag-and-drop prioritization, push reminders, and a JARVIS-inspired voice assistant." />
+    <meta property="og:title" content="ArcMatrix — Eisenhower Task Matrix & Voice Assistant" />
+    <meta property="og:description" content="Eisenhower Matrix task planner with drag-and-drop prioritization, push reminders, and a JARVIS-inspired voice assistant." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400..700;1,9..40,400..700&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script>
+      (function () {
+        try {
+          if (localStorage.getItem('arcmatrix_theme_v1') === 'dark') {
+            document.documentElement.classList.add('dark');
+          }
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body class="bg-neutral-50 text-neutral-950 antialiased selection:bg-neutral-200 selection:text-neutral-950 dark:bg-[#050608] dark:text-neutral-50 dark:selection:bg-sky-500/30 dark:selection:text-white">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
