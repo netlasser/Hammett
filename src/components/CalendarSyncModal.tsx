@@ -293,7 +293,7 @@ export function CalendarSyncModal({
                   No scheduled deadlines yet
                 </p>
                 <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
-                  Add a reminder time to any task (or ask Jarvis to schedule one) to export or sync it here.
+                  Add a reminder time to any task to export or sync it here.
                 </p>
               </div>
             ) : (

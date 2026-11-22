@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  applyJarvisActions,
   computeReminderTimestamp,
   createInitialSeedTasks,
   createTask,
@@ -132,43 +131,4 @@ test('updateTask resets reminderFired when reminderAt changes', () => {
   const updated = updateTask(tasks, 't1', { reminderAt: now + 30_000 }, now);
   assert.equal(updated[0].reminderFired, false);
   assert.equal(updated[0].reminderAt, now + 30_000);
-});
-
-test('applyJarvisActions adds, moves, sets reminder, and completes tasks by natural intent', () => {
-  const now = 5_000_000;
-  const seed = createInitialSeedTasks(now);
-
-  const result = applyJarvisActions(
-    seed,
-    [
-      {
-        type: 'add_task',
-        title: 'Calibrate Mark VII flight stabilizers',
-        quadrant: 'Q1' as unknown as 'q1',
-        reminderMinutesFromNow: 15,
-      },
-      {
-        type: 'move_task',
-        targetTaskTitle: 'Unused Slack webhook',
-        quadrant: 'q3',
-      },
-      {
-        type: 'complete_task',
-        targetTaskTitle: 'security compliance questionnaire',
-      },
-    ],
-    now,
-  );
-
-  assert.equal(result.summaries.length, 3);
-  const added = result.tasks.find((t) => t.title === 'Calibrate Mark VII flight stabilizers');
-  assert.ok(added);
-  assert.equal(added.quadrant, 'q1');
-  assert.equal(added.reminderAt, computeReminderTimestamp(15, now));
-
-  const moved = result.tasks.find((t) => t.id === 'seed-6');
-  assert.equal(moved?.quadrant, 'q3');
-
-  const completed = result.tasks.find((t) => t.id === 'seed-2');
-  assert.equal(completed?.completed, true);
 });

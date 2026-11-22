@@ -32,7 +32,7 @@ const VIEW_HEADERS: Record<
     title: 'Scheduled Push Reminders',
     subtitle: 'Tasks with active alert timers. Notifications trigger automatically when due.',
     emptyTitle: 'No scheduled reminders',
-    emptyHint: 'Set a reminder when creating a task or ask Jarvis to remind you at a specific time.',
+    emptyHint: 'Set a reminder when creating a task to see it here.',
   },
   completed: {
     title: 'Completed Archive',

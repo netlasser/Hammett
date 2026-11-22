@@ -1,11 +1,9 @@
-import { Mic, Moon, Sun } from 'lucide-react';
+import { Moon, Sun } from 'lucide-react';
 import type { AppView } from '../types/task';
 
 interface TopBarProps {
   activeView: AppView;
   onSelectView: (view: AppView) => void;
-  onOpenJarvis: () => void;
-  jarvisActive: boolean;
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
   counts: {
@@ -26,8 +24,6 @@ const NAV_ITEMS: { id: AppView; label: string }[] = [
 export function TopBar({
   activeView,
   onSelectView,
-  onOpenJarvis,
-  jarvisActive,
   theme,
   onToggleTheme,
   counts,
@@ -107,21 +103,6 @@ export function TopBar({
                   <span className="hidden sm:inline">Night</span>
                 </>
               )}
-            </button>
-
-            <button
-              type="button"
-              onClick={onOpenJarvis}
-              aria-expanded={jarvisActive}
-              aria-label="Talk to Jarvis"
-              className={`inline-flex h-8 items-center gap-2 rounded-full px-3.5 sm:px-4 text-sm font-medium transition-all whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-900 dark:focus-visible:outline-sky-400 ${
-                jarvisActive
-                  ? 'bg-neutral-950 text-white dark:bg-white dark:text-neutral-950'
-                  : 'border border-neutral-200 bg-white text-neutral-900 hover:border-neutral-300 hover:bg-neutral-50 dark:border-sky-400/35 dark:bg-[#0F131A] dark:text-sky-200 dark:hover:border-sky-400/60 dark:hover:bg-sky-400/10'
-              }`}
-            >
-              <Mic className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Jarvis</span>
             </button>
           </div>
         </div>

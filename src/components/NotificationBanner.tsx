@@ -4,7 +4,6 @@ import { QUADRANT_META } from '../utils/matrix';
 
 interface NotificationBannerProps {
   alerts: NotificationAlert[];
-  jarvisOpen?: boolean;
   onDismiss: (alertId: string) => void;
   onCompleteTask: (taskId: string, alertId: string) => void;
   onSnoozeTask: (taskId: string, alertId: string) => void;
@@ -12,7 +11,6 @@ interface NotificationBannerProps {
 
 export function NotificationBanner({
   alerts,
-  jarvisOpen = false,
   onDismiss,
   onCompleteTask,
   onSnoozeTask,
@@ -23,9 +21,7 @@ export function NotificationBanner({
     <aside
       aria-label="Active reminders"
       aria-live="polite"
-      className={`fixed bottom-4 z-40 flex w-full max-w-sm flex-col gap-2.5 px-4 transition-all sm:px-0 ${
-        jarvisOpen ? 'right-4 lg:right-[27rem]' : 'right-4'
-      }`}
+      className="fixed bottom-4 right-4 z-40 flex w-full max-w-sm flex-col gap-2.5 px-4 transition-all sm:px-0"
     >
       {alerts.map((alert) => (
         <div
