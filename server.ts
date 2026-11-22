@@ -52,6 +52,8 @@ function getVersionedAiClient(apiVersion: 'v1alpha' | 'v1beta'): GoogleGenAI | n
   });
 }
 
+const LIVE_MODEL_ID = 'gemini-3.8-live';
+
 const JARVIS_SYSTEM_INSTRUCTION = `You are J.A.R.V.I.S. (Just A Rather Very Intelligent System), the poised, articulate, subtly dry-witted British AI assistant from the Marvel Cinematic Universe, integrated into ArcMatrix (an Eisenhower Matrix task manager).
 
 Persona & Tone:
@@ -963,6 +965,73 @@ async function startServer() {
     }
   });
 
+  app.get('/api/jarvis/selftest/key', (_req, res) => {
+    res.json({ configured: getAiClient() !== null });
+  });
+
+  app.post('/api/jarvis/selftest/live', async (_req, res) => {
+    const aiBeta = getVersionedAiClient('v1beta');
+    const aiAlpha = getVersionedAiClient('v1alpha');
+    const candidates = [aiBeta, aiAlpha].filter((c): c is GoogleGenAI => Boolean(c));
+
+    if (candidates.length === 0) {
+      res.json({
+        ok: false,
+        model: LIVE_MODEL_ID,
+        apiVersion: null,
+        error: 'GEMINI_API_KEY is not configured on the server.',
+      });
+      return;
+    }
+
+    const attempts: { apiVersion: string; error: string }[] = [];
+    for (const client of candidates) {
+      const apiVersion = client === aiBeta ? 'v1beta' : 'v1alpha';
+      try {
+        const session = await withTimeout(
+          client.live.connect({
+            model: LIVE_MODEL_ID,
+            config: {
+              responseModalities: [Modality.AUDIO],
+              speechConfig: {
+                voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Charon' } },
+              },
+              inputAudioTranscription: {},
+              outputAudioTranscription: {},
+              systemInstruction: JARVIS_SYSTEM_INSTRUCTION,
+              tools: [{ functionDeclarations: JARVIS_LIVE_TOOLS }],
+            },
+            callbacks: {
+              onopen: () => {},
+              onmessage: () => {},
+              onerror: () => {},
+              onclose: () => {},
+            },
+          }),
+          12000,
+          'Live self-test connect',
+        );
+        try {
+          void Promise.resolve(session.close());
+        } catch {
+          // ignore close errors
+        }
+        res.json({ ok: true, model: LIVE_MODEL_ID, apiVersion });
+        return;
+      } catch (err) {
+        attempts.push({ apiVersion, error: extractCleanErrorMessage(err, 'Live session failed.') });
+      }
+    }
+
+    res.status(502).json({
+      ok: false,
+      model: LIVE_MODEL_ID,
+      apiVersion: attempts[attempts.length - 1]?.apiVersion ?? null,
+      error: attempts[attempts.length - 1]?.error ?? 'Live session failed.',
+      attempts,
+    });
+  });
+
   // Real-Time Gemini Live API WebSocket bridge (explicit upgrade routing avoids interfering with any other paths)
   const wss = new WebSocketServer({ noServer: true });
 
@@ -1039,7 +1108,7 @@ async function startServer() {
       liveInstruction: string,
     ): Promise<Awaited<ReturnType<GoogleGenAI['live']['connect']>>> => {
       return aiClient.live.connect({
-        model: 'gemini-3.8-live',
+        model: LIVE_MODEL_ID,
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
@@ -1181,7 +1250,7 @@ async function startServer() {
           }
           liveSession = session;
           sessionReady = true;
-          console.log(`[Jarvis Live] Gemini session ready (apiVersion=${(client === aiAlpha ? 'v1alpha' : 'v1beta')}, model=gemini-3.8-live)`);
+          console.log(`[Jarvis Live] Gemini session ready (apiVersion=${(client === aiAlpha ? 'v1alpha' : 'v1beta')}, model=${LIVE_MODEL_ID})`);
           safeSend({ type: 'ready' });
 
           while (pendingAudioChunks.length > 0) {

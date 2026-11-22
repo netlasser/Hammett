@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { Mic, Phone, PhoneOff, RotateCcw, Send, Square, Volume2, VolumeX, X } from 'lucide-react';
+import { Activity, Mic, Phone, PhoneOff, RotateCcw, Send, Square, Volume2, VolumeX, X } from 'lucide-react';
 import type { JarvisAction, JarvisCommandResponse, JarvisMessage, Task } from '../types/task';
 import {
   cancelBrowserSpeech,
@@ -21,6 +21,7 @@ import {
   resampleFloat32ToInt16,
 } from '../utils/pcm';
 import { JarvisOrbCanvas, type JarvisStatus } from './JarvisOrbCanvas';
+import { VoiceSelfTest } from './VoiceSelfTest';
 
 interface JarvisConsoleProps {
   isOpen: boolean;
@@ -139,6 +140,7 @@ export function JarvisConsole({
   const [liveJarvisCaption, setLiveJarvisCaption] = useState('');
   const [messages, setMessages] = useState<JarvisMessage[]>([WELCOME_MESSAGE]);
   const [voiceStage, setVoiceStage] = useState<string>('idle');
+  const [selfTestOpen, setSelfTestOpen] = useState(false);
 
   const amplitudeRef = useRef<number>(0);
   const firstLiveAudioSentRef = useRef<boolean>(false);
@@ -1630,7 +1632,18 @@ export function JarvisConsole({
             )}
           </div>
         )}
+
+        <button
+          type="button"
+          onClick={() => setSelfTestOpen((v) => !v)}
+          className="mt-3 inline-flex items-center gap-1.5 rounded-full border border-white/15 px-3 py-1 text-[10px] font-medium text-neutral-300 transition-colors hover:bg-white/10 hover:text-white dark:border-sky-400/25"
+        >
+          <Activity className="h-3 w-3" aria-hidden="true" />
+          <span>{selfTestOpen ? 'Hide self-test' : 'Run voice self-test'}</span>
+        </button>
       </div>
+
+      {selfTestOpen && <VoiceSelfTest />}
 
       {/* Clean Dialogue Feed */}
       <div className="flex-1 space-y-5 overflow-y-auto px-6 py-5">
