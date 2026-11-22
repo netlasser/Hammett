@@ -981,6 +981,7 @@ async function startServer() {
     const aiAlpha = getVersionedAiClient('v1alpha');
     const aiBeta = getVersionedAiClient('v1beta');
     if (!aiAlpha && !aiBeta) {
+      console.error('[Jarvis Live] Rejected client: GEMINI_API_KEY is missing or placeholder on the server.');
       clientWs.send(
         JSON.stringify({
           type: 'error',
@@ -1070,7 +1071,12 @@ async function startServer() {
 
             for (const part of content?.modelTurn?.parts ?? []) {
               if (part.inlineData?.data) {
-                safeSend({ type: 'audio', data: part.inlineData.data });
+                const rateMatch = /rate=(\d+)/.exec(part.inlineData.mimeType ?? '');
+                safeSend({
+                  type: 'audio',
+                  data: part.inlineData.data,
+                  sampleRate: rateMatch ? Number(rateMatch[1]) : undefined,
+                });
               }
             }
 
@@ -1175,6 +1181,7 @@ async function startServer() {
           }
           liveSession = session;
           sessionReady = true;
+          console.log(`[Jarvis Live] Gemini session ready (apiVersion=${(client === aiAlpha ? 'v1alpha' : 'v1beta')}, model=gemini-3.8-live)`);
           safeSend({ type: 'ready' });
 
           while (pendingAudioChunks.length > 0) {
@@ -1198,6 +1205,7 @@ async function startServer() {
       }
 
       const msg = extractCleanErrorMessage(lastErr, 'Unable to start live voice session.');
+      console.error('[Jarvis Live] Gemini connect failed:', msg);
       safeSend({ type: 'error', message: msg });
       closeAll();
     };
@@ -1283,6 +1291,11 @@ async function startServer() {
 
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`ArcMatrix server listening on 0.0.0.0:${PORT}`);
+    console.log(
+      `[Jarvis] GEMINI_API_KEY: ${
+        getAiClient() ? 'configured' : 'NOT configured - Jarvis voice will report errors until it is set'
+      }`,
+    );
   });
 }
 

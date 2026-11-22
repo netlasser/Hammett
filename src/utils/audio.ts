@@ -263,14 +263,19 @@ export class LiveAudioPlayer {
     return this.activeSources.size > 0;
   }
 
-  enqueuePcmBase64(base64: string): void {
+  enqueuePcmBase64(base64: string, sampleRate?: number): void {
     const ctx = this.ensureContext();
     if (!ctx || !this.analyser) return;
 
     const samples = base64PcmToFloat32(base64);
     if (samples.length === 0) return;
 
-    const buffer = ctx.createBuffer(1, samples.length, LIVE_OUTPUT_SAMPLE_RATE);
+    const statedRate = Math.round(sampleRate ?? 0);
+    const bufferRate =
+      Number.isFinite(statedRate) && statedRate >= 8000 && statedRate <= 96000
+        ? statedRate
+        : LIVE_OUTPUT_SAMPLE_RATE;
+    const buffer = ctx.createBuffer(1, samples.length, bufferRate);
     buffer.copyToChannel(new Float32Array(samples), 0);
 
     const src = ctx.createBufferSource();

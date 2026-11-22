@@ -15,6 +15,7 @@ import {
   computeRmsLevel,
   encodeWavPcm16,
   int16ToBase64,
+  LIVE_INPUT_SAMPLE_RATE,
   mergeFloat32Chunks,
   pickSupportedRecorderMime,
   resampleFloat32ToInt16,
@@ -137,8 +138,11 @@ export function JarvisConsole({
   const [liveUserCaption, setLiveUserCaption] = useState('');
   const [liveJarvisCaption, setLiveJarvisCaption] = useState('');
   const [messages, setMessages] = useState<JarvisMessage[]>([WELCOME_MESSAGE]);
+  const [voiceStage, setVoiceStage] = useState<string>('idle');
 
   const amplitudeRef = useRef<number>(0);
+  const firstLiveAudioSentRef = useRef<boolean>(false);
+  const firstLiveAudioReceivedRef = useRef<boolean>(false);
 
   // Capture & recording refs
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -198,6 +202,11 @@ export function JarvisConsole({
 
   const appendMessage = useCallback((msg: JarvisMessage) => {
     setMessages((prev) => [...prev, msg]);
+  }, []);
+
+  const logStage = useCallback((stage: string, detail?: unknown) => {
+    console.log(`[Jarvis Voice] stage: ${stage}`, detail ?? '');
+    setVoiceStage(stage);
   }, []);
 
   const updateMicMeter = useCallback((level: number) => {
@@ -453,6 +462,7 @@ export function JarvisConsole({
         }
 
         const handle = playWavBase64(base64, mimeType, amplitudeRef, () => {
+          logStage('playback-started', { mimeType });
           setStatus('speaking');
         });
         activePlaybackRef.current = handle;
@@ -463,6 +473,7 @@ export function JarvisConsole({
         const spokeFallback = speakWithBrowserSynthesis(
           text,
           () => {
+            logStage('playback-started-fallback-browser-tts');
             setStatus('speaking');
             amplitudeRef.current = 0.42;
           },
@@ -596,11 +607,42 @@ export function JarvisConsole({
     }
 
     // Synchronous user-gesture audio unlock BEFORE any async calls (getUserMedia / WS)
+    logStage('start-clicked', { secureContext: window.isSecureContext, iframe: window.self !== window.top });
     unlockAudioOutput();
     stopUnaryPlayback();
     stopPttRecorder(true);
 
+    if (!window.isSecureContext) {
+      logStage('failed-insecure-context');
+      appendMessage({
+        id: `jarvis-https-${Date.now()}`,
+        role: 'jarvis',
+        text: 'Microphone access requires HTTPS. Reopen this page over HTTPS (or use localhost while developing).',
+        timestamp: Date.now(),
+        isError: true,
+      });
+      return;
+    }
+
+    try {
+      const perm = await navigator.permissions?.query?.({ name: 'microphone' as PermissionName });
+      if (perm && perm.state === 'denied') {
+        logStage('failed-mic-permission-blocked');
+        appendMessage({
+          id: `jarvis-perm-${Date.now()}`,
+          role: 'jarvis',
+          text: 'Microphone is blocked at the browser or iframe level. Allow mic access in the address bar / parent page settings, or open the app outside the preview iframe.',
+          timestamp: Date.now(),
+          isError: true,
+        });
+        return;
+      }
+    } catch {
+      // Permissions query unsupported; getUserMedia result is authoritative
+    }
+
     if (!navigator.mediaDevices?.getUserMedia) {
+      logStage('failed-getusermedia-unsupported');
       appendMessage({
         id: `jarvis-nomic-${Date.now()}`,
         role: 'jarvis',
@@ -627,6 +669,7 @@ export function JarvisConsole({
     }
 
     const player = new LiveAudioPlayer(amplitudeRef, (isSpeaking) => {
+      if (isSpeaking) logStage('playback-started');
       setStatus((prev) => {
         if (!liveWsRef.current) return 'idle';
         if (isSpeaking) return 'speaking';
@@ -642,15 +685,13 @@ export function JarvisConsole({
 
     let stream: MediaStream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
+      logStage('mic-permission-requested');
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      logStage('mic-granted', { track: stream.getAudioTracks()[0]?.label || 'unknown' });
       mediaStreamRef.current = stream;
     } catch (err) {
+      const errName = err instanceof Error ? err.name : 'UnknownError';
+      logStage('mic-denied-or-failed', { name: errName, message: err instanceof Error ? err.message : String(err) });
       if (captureCtx && captureCtx.state !== 'closed') {
         captureCtx.close().catch(() => {});
       }
@@ -658,10 +699,14 @@ export function JarvisConsole({
       player.close();
       livePlayerRef.current = null;
 
-      const detail =
-        err instanceof Error && /notfound|device/i.test(err.name + err.message)
-          ? 'No microphone device was detected. Connect a microphone or type your command below.'
-          : 'Microphone permission was declined or blocked by browser settings. Allow microphone access or type below.';
+      const inIframe = window.self !== window.top;
+      const detail = /notfound|device/i.test(errName)
+        ? 'No microphone device was detected. Connect a microphone or type your command below.'
+        : /notallowed|permission/i.test(errName)
+          ? inIframe
+            ? 'Microphone permission was blocked, likely by the embedded preview iframe. Allow microphone in your browser address bar, or open this app in its own tab.'
+            : 'Microphone permission was declined. Allow microphone access in the address bar or type below.'
+          : 'Microphone could not be opened. Check that it is not in use by another app, or type below.';
       appendMessage({
         id: `jarvis-mic-err-${Date.now()}`,
         role: 'jarvis',
@@ -675,10 +720,14 @@ export function JarvisConsole({
     }
 
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${proto}//${window.location.host}/api/jarvis/live`);
+    const wsUrl = `${proto}//${window.location.host}/api/jarvis/live`;
+    logStage('ws-connecting', { url: wsUrl });
+    const ws = new WebSocket(wsUrl);
     liveWsRef.current = ws;
     liveReadyRef.current = false;
     liveAwaitingToolReplyRef.current = false;
+    firstLiveAudioSentRef.current = false;
+    firstLiveAudioReceivedRef.current = false;
 
     const connectTimeout = window.setTimeout(() => {
       if (!liveReadyRef.current && liveWsRef.current === ws) {
@@ -694,6 +743,7 @@ export function JarvisConsole({
     }, 12000);
 
     ws.onopen = () => {
+      logStage('ws-open-sending-init');
       ws.send(
         JSON.stringify({
           type: 'init',
@@ -722,6 +772,8 @@ export function JarvisConsole({
           processor.connect(silentGain);
           silentGain.connect(captureCtx.destination);
 
+          logStage('audio-capture-started', { captureSampleRate: captureCtx.sampleRate });
+
           processor.onaudioprocess = (ev) => {
             if (!liveWsRef.current || liveWsRef.current.readyState !== WebSocket.OPEN) return;
             const channel = ev.inputBuffer.getChannelData(0);
@@ -737,7 +789,7 @@ export function JarvisConsole({
             if (!liveReadyRef.current) return;
             if (jarvisSpeaking && level < 0.16) return;
 
-            const pcm16 = resampleFloat32ToInt16(channel, captureCtx.sampleRate, 16000);
+            const pcm16 = resampleFloat32ToInt16(channel, captureCtx.sampleRate, LIVE_INPUT_SAMPLE_RATE);
             if (pcm16.length > 0) {
               liveWsRef.current.send(
                 JSON.stringify({
@@ -745,10 +797,18 @@ export function JarvisConsole({
                   data: int16ToBase64(pcm16),
                 }),
               );
+              if (!firstLiveAudioSentRef.current) {
+                firstLiveAudioSentRef.current = true;
+                logStage('audio-sent', {
+                  captureSampleRate: captureCtx.sampleRate,
+                  upsampledTo: LIVE_INPUT_SAMPLE_RATE,
+                });
+              }
             }
           };
-        } catch {
+        } catch (err) {
           window.clearTimeout(connectTimeout);
+          logStage('failed-capture-init', { message: err instanceof Error ? err.message : String(err) });
           appendMessage({
             id: `jarvis-ctx-err-${Date.now()}`,
             role: 'jarvis',
@@ -759,6 +819,18 @@ export function JarvisConsole({
           stopLiveSession();
           setVoiceMode('ptt');
         }
+      } else {
+        window.clearTimeout(connectTimeout);
+        logStage('failed-capture-unavailable');
+        appendMessage({
+          id: `jarvis-ctx-null-${Date.now()}`,
+          role: 'jarvis',
+          text: 'Web Audio capture is unavailable in this browser. Switching to Push-to-Talk instead.',
+          timestamp: Date.now(),
+          isError: true,
+        });
+        stopLiveSession();
+        setVoiceMode('ptt');
       }
     };
 
@@ -768,12 +840,14 @@ export function JarvisConsole({
           type?: string;
           text?: string;
           data?: string;
+          sampleRate?: number;
           actions?: JarvisAction[];
           message?: string;
         };
 
         if (payload.type === 'ready') {
           window.clearTimeout(connectTimeout);
+          logStage('ai-session-ready');
           liveReadyRef.current = true;
           setLiveConnecting(false);
           setLiveActive(true);
@@ -817,7 +891,11 @@ export function JarvisConsole({
             liveToolTimeoutRef.current = null;
           }
           if (voiceEnabledRef.current && livePlayerRef.current) {
-            livePlayerRef.current.enqueuePcmBase64(payload.data);
+            if (!firstLiveAudioReceivedRef.current) {
+              firstLiveAudioReceivedRef.current = true;
+              logStage('response-audio-received', { sampleRate: payload.sampleRate ?? null });
+            }
+            livePlayerRef.current.enqueuePcmBase64(payload.data, payload.sampleRate);
           }
           return;
         }
@@ -870,6 +948,7 @@ export function JarvisConsole({
 
         if (payload.type === 'error') {
           window.clearTimeout(connectTimeout);
+          logStage('ai-session-error', { message: payload.message || 'unknown' });
           appendMessage({
             id: `live-err-${Date.now()}`,
             role: 'jarvis',
@@ -894,6 +973,7 @@ export function JarvisConsole({
 
     ws.onerror = () => {
       window.clearTimeout(connectTimeout);
+      logStage('ws-error');
       if (liveWsRef.current === ws) {
         appendMessage({
           id: `live-ws-err-${Date.now()}`,
@@ -908,6 +988,7 @@ export function JarvisConsole({
 
     ws.onclose = (ev) => {
       window.clearTimeout(connectTimeout);
+      logStage('ws-closed', { code: ev.code, reason: ev.reason || 'none' });
       if (liveWsRef.current === ws) {
         const failedHandshake = !liveReadyRef.current;
         const abnormalClose = ev.code !== 1000 && ev.code !== 1005;
@@ -941,9 +1022,22 @@ export function JarvisConsole({
     }
 
     // Synchronous user-gesture unlock BEFORE async getUserMedia
+    logStage('ptt-start-clicked');
     unlockAudioOutput();
     stopUnaryPlayback();
     playJarvisChime('activate');
+
+    if (!window.isSecureContext) {
+      logStage('failed-insecure-context');
+      appendMessage({
+        id: `jarvis-https-${Date.now()}`,
+        role: 'jarvis',
+        text: 'Microphone recording requires HTTPS. Reopen this page over HTTPS (or use localhost while developing).',
+        timestamp: Date.now(),
+        isError: true,
+      });
+      return;
+    }
 
     if (!navigator.mediaDevices?.getUserMedia) {
       appendMessage({
@@ -972,24 +1066,26 @@ export function JarvisConsole({
 
     let stream: MediaStream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
+      logStage('mic-permission-requested');
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      logStage('mic-granted', { track: stream.getAudioTracks()[0]?.label || 'unknown' });
       mediaStreamRef.current = stream;
     } catch (err) {
+      const errName = err instanceof Error ? err.name : 'UnknownError';
+      logStage('mic-denied-or-failed', { name: errName, message: err instanceof Error ? err.message : String(err) });
       if (captureCtx && captureCtx.state !== 'closed') {
         captureCtx.close().catch(() => {});
       }
       captureAudioCtxRef.current = null;
 
-      const detail =
-        err instanceof Error && /notfound|device/i.test(err.name + err.message)
-          ? 'No microphone device was detected. Connect a microphone or type below.'
-          : 'Microphone permission was declined. Allow microphone access or type below.';
+      const inIframe = window.self !== window.top;
+      const detail = /notfound|device/i.test(errName)
+        ? 'No microphone device was detected. Connect a microphone or type below.'
+        : /notallowed|permission/i.test(errName)
+          ? inIframe
+            ? 'Microphone permission was blocked, likely by the embedded preview iframe. Allow microphone in your browser address bar, or open this app in its own tab.'
+            : 'Microphone permission was declined. Allow microphone access in the address bar or type below.'
+          : 'Microphone could not be opened. Check that it is not in use by another app, or type below.';
       appendMessage({
         id: `jarvis-mic-err-${Date.now()}`,
         role: 'jarvis',
@@ -1031,6 +1127,8 @@ export function JarvisConsole({
         source.connect(processor);
         processor.connect(silentGain);
         silentGain.connect(captureCtx.destination);
+
+        logStage('audio-capture-started', { captureSampleRate: captureCtx.sampleRate });
 
         processor.onaudioprocess = (ev) => {
           if (discardRecordingRef.current) return;
@@ -1155,6 +1253,7 @@ export function JarvisConsole({
       try {
         const controller = new AbortController();
         const timeoutId = window.setTimeout(() => controller.abort(), 25000);
+        logStage('voice-clip-uploading', { mimeType, bytes: Math.round((audioBase64.length * 3) / 4) });
         const shouldSkipServerTts =
           !voiceEnabledRef.current || Date.now() < ttsCooldownUntilRef.current;
 
@@ -1177,6 +1276,7 @@ export function JarvisConsole({
         if (!res.ok) {
           throw new Error(data.error || 'Unable to process voice command.');
         }
+        logStage('response-received', { status: res.status, inaudible: data.inaudible ?? false });
 
         if (data.ttsFallback === 'browser') {
           ttsCooldownUntilRef.current = Date.now() + 5 * 60_000;
@@ -1434,10 +1534,19 @@ export function JarvisConsole({
 
         <JarvisOrbCanvas status={status} amplitudeRef={amplitudeRef} />
 
-        <div className="mt-2 flex items-center gap-2">
+        <div className="mt-2 flex flex-col items-center gap-0.5">
           <span className="font-mono text-[11px] tracking-wider tabular-nums text-neutral-400 dark:text-sky-300">
             {statusLabel}
           </span>
+          {voiceStage !== 'idle' && (
+            <span
+              aria-live="polite"
+              className="max-w-full truncate font-mono text-[10px] text-neutral-500 dark:text-neutral-400"
+              title={`Last voice pipeline stage: ${voiceStage}`}
+            >
+              stage: {voiceStage}
+            </span>
+          )}
         </div>
 
         {showMicMeter && (
