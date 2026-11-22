@@ -1,4 +1,3 @@
-import 'dotenv/config';
 import crypto from 'crypto';
 import express from 'express';
 import fs from 'fs';
@@ -6,13 +5,6 @@ import { createServer } from 'http';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import {
-  extractCleanErrorMessage,
-  getAiClient,
-  runJarvisCommand,
-  sanitizeHistory,
-  sanitizeTasksSummary,
-} from './netlify/functions/_lib/jarvis-core';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -246,48 +238,6 @@ async function startServer() {
       .send(renderFeedIcs(feed));
   });
 
-  app.post('/api/jarvis/command', async (req, res) => {
-    const ai = getAiClient();
-    if (!ai) {
-      res.status(503).json({
-        error:
-          'Gemini API key is not configured on the server. Add GEMINI_API_KEY in Settings > Secrets to enable Jarvis.',
-      });
-      return;
-    }
-
-    const body = req.body as {
-      transcript?: unknown;
-      tasksSummary?: unknown;
-      conversationHistory?: unknown;
-      localTime?: unknown;
-    };
-
-    if (typeof body.transcript !== 'string' || !body.transcript.trim()) {
-      res.status(400).json({ error: 'Please provide a text command.' });
-      return;
-    }
-
-    const transcript = body.transcript.trim().slice(0, 1000);
-    const localTime =
-      typeof body.localTime === 'string' && body.localTime.trim()
-        ? body.localTime.trim().slice(0, 64)
-        : new Date().toISOString();
-
-    try {
-      const result = await runJarvisCommand(ai, {
-        transcript,
-        tasksSummary: sanitizeTasksSummary(body.tasksSummary),
-        conversationHistory: sanitizeHistory(body.conversationHistory),
-        localTime,
-      });
-      res.json(result);
-    } catch (err) {
-      const message = extractCleanErrorMessage(err, 'Failed to process Jarvis command.');
-      res.status(502).json({ error: message });
-    }
-  });
-
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
@@ -310,11 +260,6 @@ async function startServer() {
 
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`ArcMatrix server listening on 0.0.0.0:${PORT}`);
-    console.log(
-      `[Jarvis] GEMINI_API_KEY: ${
-        getAiClient() ? 'configured' : 'NOT configured - Jarvis commands will report errors until it is set'
-      }`,
-    );
   });
 }
 

@@ -37,37 +37,4 @@ export interface NotificationAlert {
   isTest?: boolean;
 }
 
-export type JarvisActionType =
-  | 'add_task'
-  | 'move_task'
-  | 'complete_task'
-  | 'delete_task'
-  | 'set_reminder'
-  | 'none';
 
-export interface JarvisAction {
-  type: JarvisActionType;
-  title?: string;
-  notes?: string;
-  quadrant?: QuadrantId;
-  targetTaskTitle?: string;
-  reminderMinutesFromNow?: number | null;
-  reminderIso?: string | null;
-}
-
-export interface JarvisCommandResponse {
-  reply: string;
-  actions: JarvisAction[];
-  followUpExpected: boolean;
-}
-
-export interface JarvisMessage {
-  id: string;
-  role: 'user' | 'jarvis';
-  text: string;
-  timestamp: number;
-  appliedSummaries?: string[];
-  isError?: boolean;
-  audioBase64?: string | null;
-  audioMimeType?: string | null;
-}

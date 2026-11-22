@@ -7,11 +7,6 @@
   node_bundler = "esbuild"
 
 [[redirects]]
-  from = "/api/jarvis/command"
-  to = "/.netlify/functions/jarvis-command"
-  status = 200
-
-[[redirects]]
   from = "/api/calendar/feed"
   to = "/.netlify/functions/calendar-feed"
   status = 200

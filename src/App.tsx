@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CalendarSyncModal } from './components/CalendarSyncModal';
 import { EisenhowerMatrix } from './components/EisenhowerMatrix';
-import { JarvisConsole } from './components/JarvisConsole';
 import { NotificationBanner } from './components/NotificationBanner';
 import { QuickAddBar } from './components/QuickAddBar';
 import { TaskListView } from './components/TaskListView';
@@ -9,7 +8,6 @@ import { TaskModal } from './components/TaskModal';
 import { TopBar } from './components/TopBar';
 import type {
   AppView,
-  JarvisAction,
   NotificationAlert,
   QuadrantId,
   Task,
@@ -17,7 +15,6 @@ import type {
 import { playJarvisChime } from './utils/audio';
 import { downloadTasksAsIcs } from './utils/calendarSync';
 import {
-  applyJarvisActions,
   clearCompletedTasks,
   createInitialSeedTasks,
   createTask,
@@ -88,7 +85,6 @@ export default function App() {
   const [activeView, setActiveView] = useState<AppView>('matrix');
   const [searchQuery, setSearchQuery] = useState('');
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
-  const [jarvisOpen, setJarvisOpen] = useState(false);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
@@ -302,14 +298,6 @@ export default function App() {
     ]);
   }, []);
 
-  const handleApplyJarvisActions = useCallback((actions: JarvisAction[]): string[] => {
-    const result = applyJarvisActions(tasksRef.current, actions, Date.now());
-    if (result.summaries.length > 0) {
-      setTasks(result.tasks);
-    }
-    return result.summaries;
-  }, []);
-
   const syncCalendarFeed = useCallback(
     async (feedIdOverride?: string | null, includeCompletedOverride?: boolean) => {
       setFeedSyncing(true);
@@ -403,8 +391,6 @@ export default function App() {
       <TopBar
         activeView={activeView}
         onSelectView={setActiveView}
-        onOpenJarvis={() => setJarvisOpen((prev) => !prev)}
-        jarvisActive={jarvisOpen}
         theme={theme}
         onToggleTheme={() => setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))}
         counts={counts}
@@ -474,7 +460,6 @@ export default function App() {
 
       <NotificationBanner
         alerts={alerts}
-        jarvisOpen={jarvisOpen}
         onDismiss={(alertId) =>
           setAlerts((prev) => prev.filter((a) => a.id !== alertId))
         }
@@ -486,13 +471,6 @@ export default function App() {
           setTasks((prev) => snoozeTaskReminder(prev, taskId, 10));
           setAlerts((prev) => prev.filter((a) => a.id !== alertId));
         }}
-      />
-
-      <JarvisConsole
-        isOpen={jarvisOpen}
-        onClose={() => setJarvisOpen(false)}
-        tasks={tasks}
-        onApplyActions={handleApplyJarvisActions}
       />
     </div>
   );

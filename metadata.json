@@ -1,7 +1,4 @@
 {
   "name": "ArcMatrix",
-  "description": "Eisenhower Matrix task planner with drag-and-drop prioritization, push reminders, and a JARVIS-inspired command assistant.",
-  "majorCapabilities": [
-    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
-  ]
+  "description": "Offline Eisenhower Matrix task planner with drag-and-drop prioritization, push reminders, and calendar sync."
 }
