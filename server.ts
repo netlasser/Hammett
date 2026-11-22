@@ -7,19 +7,11 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import {
-  createLiveAuthToken,
   extractCleanErrorMessage,
   getAiClient,
-  getVersionedAiClient,
-  isTtsQuotaCoolingDown,
-  LIVE_MODEL_ID,
-  normalizeAudioMime,
   runJarvisCommand,
   sanitizeHistory,
   sanitizeTasksSummary,
-  synthesizeJarvisSpeech,
-  transcribeAudioBuffer,
-  withTimeout,
 } from './netlify/functions/_lib/jarvis-core';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -272,7 +264,7 @@ async function startServer() {
     };
 
     if (typeof body.transcript !== 'string' || !body.transcript.trim()) {
-      res.status(400).json({ error: 'Please provide a spoken or typed command.' });
+      res.status(400).json({ error: 'Please provide a text command.' });
       return;
     }
 
@@ -293,177 +285,6 @@ async function startServer() {
     } catch (err) {
       const message = extractCleanErrorMessage(err, 'Failed to process Jarvis command.');
       res.status(502).json({ error: message });
-    }
-  });
-
-  app.post('/api/jarvis/voice-turn', async (req, res) => {
-    const ai = getAiClient();
-    const aiTts = getVersionedAiClient('v1alpha');
-    if (!ai) {
-      res.status(503).json({
-        error:
-          'Gemini API key is not configured on the server. Add GEMINI_API_KEY in Settings > Secrets to enable Jarvis.',
-      });
-      return;
-    }
-
-    const body = req.body as {
-      audioBase64?: unknown;
-      mimeType?: unknown;
-      tasksSummary?: unknown;
-      conversationHistory?: unknown;
-      localTime?: unknown;
-      includeTts?: unknown;
-    };
-
-    if (typeof body.audioBase64 !== 'string' || !body.audioBase64.trim()) {
-      res.status(400).json({ error: 'Audio payload is required.' });
-      return;
-    }
-
-    const audioBase64 = body.audioBase64;
-    const rawMime = typeof body.mimeType === 'string' ? body.mimeType : 'audio/webm';
-    const normalizedMime = normalizeAudioMime(rawMime);
-    if (!normalizedMime) {
-      res.status(400).json({ error: `Unsupported audio MIME type: ${rawMime}` });
-      return;
-    }
-
-    const localTime =
-      typeof body.localTime === 'string' && body.localTime.trim()
-        ? body.localTime.trim().slice(0, 64)
-        : new Date().toISOString();
-
-    try {
-      const transcript = await transcribeAudioBuffer(audioBase64, normalizedMime);
-      if (!transcript) {
-        res.json({
-          transcript: '',
-          inaudible: true,
-          reply: 'I did not catch that clearly, sir. Please speak a bit closer or try again.',
-          actions: [],
-          followUpExpected: false,
-        });
-        return;
-      }
-
-      const commandResult = await runJarvisCommand(ai, {
-        transcript,
-        tasksSummary: sanitizeTasksSummary(body.tasksSummary),
-        conversationHistory: sanitizeHistory(body.conversationHistory),
-        localTime,
-      });
-
-      let audioPayload: { audioBase64: string; mimeType: string } | null = null;
-      if (body.includeTts !== false && aiTts && !isTtsQuotaCoolingDown()) {
-        try {
-          audioPayload = await synthesizeJarvisSpeech(aiTts, commandResult.reply);
-        } catch {
-          audioPayload = null;
-        }
-      }
-
-      res.json({
-        transcript,
-        inaudible: false,
-        ...commandResult,
-        audioBase64: audioPayload?.audioBase64 ?? null,
-        mimeType: audioPayload?.mimeType ?? null,
-        ttsFallback: body.includeTts !== false && !audioPayload ? 'browser' : null,
-      });
-    } catch (err) {
-      const message = extractCleanErrorMessage(err, 'Voice turn failed.');
-      res.status(502).json({ error: message });
-    }
-  });
-
-  app.post('/api/jarvis/speak', async (req, res) => {
-    const aiTts = getVersionedAiClient('v1alpha');
-    if (!aiTts) {
-      res.status(503).json({
-        error: 'Gemini API key is not configured on the server.',
-      });
-      return;
-    }
-
-    const body = req.body as { text?: unknown };
-    if (typeof body.text !== 'string' || !body.text.trim()) {
-      res.status(400).json({ error: 'Text is required for speech synthesis.' });
-      return;
-    }
-
-    if (isTtsQuotaCoolingDown()) {
-      res.json({ audioBase64: null, mimeType: null, fallback: 'browser' });
-      return;
-    }
-
-    try {
-      const audio = await synthesizeJarvisSpeech(aiTts, body.text);
-      res.json({ ...audio, fallback: null });
-    } catch {
-      res.json({ audioBase64: null, mimeType: null, fallback: 'browser' });
-    }
-  });
-
-  app.post('/api/jarvis/transcribe', async (req, res) => {
-    const ai = getAiClient();
-    if (!ai) {
-      res.status(503).json({
-        error: 'Gemini API key is not configured on the server.',
-      });
-      return;
-    }
-
-    const body = req.body as { audioBase64?: unknown; mimeType?: unknown };
-    if (typeof body.audioBase64 !== 'string' || !body.audioBase64.trim()) {
-      res.status(400).json({ error: 'Audio payload is required.' });
-      return;
-    }
-
-    const audioBase64 = body.audioBase64;
-    const rawMime = typeof body.mimeType === 'string' ? body.mimeType : 'audio/webm';
-    const normalizedMime = normalizeAudioMime(rawMime);
-    if (!normalizedMime) {
-      res.status(400).json({ error: 'Unsupported audio MIME type.' });
-      return;
-    }
-
-    try {
-      const transcript = await transcribeAudioBuffer(audioBase64, normalizedMime);
-      res.json({ transcript });
-    } catch (err) {
-      const message = extractCleanErrorMessage(err, 'Audio transcription failed.');
-      res.status(502).json({ error: message });
-    }
-  });
-
-  app.get('/api/jarvis/selftest/key', (_req, res) => {
-    res.json({ configured: getAiClient() !== null });
-  });
-
-  app.post('/api/jarvis/selftest/live', async (_req, res) => {
-    try {
-      const token = await withTimeout(createLiveAuthToken(), 10000, 'Ephemeral token request');
-      if (!token?.name) {
-        throw new Error('Ephemeral token response did not include a token name.');
-      }
-      res.json({ ok: true, model: LIVE_MODEL_ID, mode: 'ephemeral-token' });
-    } catch (err) {
-      res.status(502).json({
-        ok: false,
-        model: LIVE_MODEL_ID,
-        mode: 'ephemeral-token',
-        error: extractCleanErrorMessage(err, 'Live session setup failed.'),
-      });
-    }
-  });
-
-  app.post('/api/jarvis/live-token', async (_req, res) => {
-    try {
-      const token = await createLiveAuthToken();
-      res.json({ token: token.name, model: LIVE_MODEL_ID, expiresInSeconds: 1800 });
-    } catch (err) {
-      res.status(502).json({ error: extractCleanErrorMessage(err, 'Live token request failed.') });
     }
   });
 
@@ -491,7 +312,7 @@ async function startServer() {
     console.log(`ArcMatrix server listening on 0.0.0.0:${PORT}`);
     console.log(
       `[Jarvis] GEMINI_API_KEY: ${
-        getAiClient() ? 'configured' : 'NOT configured - Jarvis voice will report errors until it is set'
+        getAiClient() ? 'configured' : 'NOT configured - Jarvis commands will report errors until it is set'
       }`,
     );
   });
