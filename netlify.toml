@@ -1,0 +1,57 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+  functions = "netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
+
+[[redirects]]
+  from = "/api/jarvis/command"
+  to = "/.netlify/functions/jarvis-command"
+  status = 200
+
+[[redirects]]
+  from = "/api/jarvis/voice-turn"
+  to = "/.netlify/functions/jarvis-voice-turn"
+  status = 200
+
+[[redirects]]
+  from = "/api/jarvis/speak"
+  to = "/.netlify/functions/jarvis-speak"
+  status = 200
+
+[[redirects]]
+  from = "/api/jarvis/transcribe"
+  to = "/.netlify/functions/jarvis-transcribe"
+  status = 200
+
+[[redirects]]
+  from = "/api/jarvis/selftest/key"
+  to = "/.netlify/functions/jarvis-selftest-key"
+  status = 200
+
+[[redirects]]
+  from = "/api/jarvis/selftest/live"
+  to = "/.netlify/functions/jarvis-selftest-live"
+  status = 200
+
+[[redirects]]
+  from = "/api/jarvis/live-token"
+  to = "/.netlify/functions/jarvis-live-token"
+  status = 200
+
+[[redirects]]
+  from = "/api/calendar/feed"
+  to = "/.netlify/functions/calendar-feed"
+  status = 200
+
+[[redirects]]
+  from = "/api/calendar/feed/*"
+  to = "/.netlify/functions/calendar-feed?feedId=:splat"
+  status = 200
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

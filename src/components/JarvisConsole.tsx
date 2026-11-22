@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Activity, Mic, Phone, PhoneOff, RotateCcw, Send, Square, Volume2, VolumeX, X } from 'lucide-react';
-import type { JarvisAction, JarvisCommandResponse, JarvisMessage, Task } from '../types/task';
+import type { LiveServerMessage, Session } from '@google/genai';
+import type {
+  JarvisAction,
+  JarvisCommandResponse,
+  JarvisMessage,
+  QuadrantId,
+  Task,
+} from '../types/task';
 import {
   cancelBrowserSpeech,
   LiveAudioPlayer,
@@ -22,6 +29,18 @@ import {
 } from '../utils/pcm';
 import { JarvisOrbCanvas, type JarvisStatus } from './JarvisOrbCanvas';
 import { VoiceSelfTest } from './VoiceSelfTest';
+import {
+  buildJarvisLiveSystemInstruction,
+  connectJarvisLiveBrowser,
+  fetchLiveToken,
+  LIVE_CONNECT_API_VERSION,
+} from '../utils/geminiLiveBrowser';
+import {
+  extractCleanErrorMessage,
+  formatTasksContextBlock,
+  LIVE_MODEL_ID,
+  sanitizeTasksSummary,
+} from '../../netlify/functions/_lib/jarvis-core';
 
 interface JarvisConsoleProps {
   isOpen: boolean;
@@ -163,10 +182,10 @@ export function JarvisConsole({
   const speechRecRef = useRef<SpeechRecognitionLike | null>(null);
   const browserSpeechDraftRef = useRef<string>('');
 
-  // Playback & Live WS refs
+  // Playback & Live session refs
   const activePlaybackRef = useRef<PlaybackHandle | null>(null);
   const livePlayerRef = useRef<LiveAudioPlayer | null>(null);
-  const liveWsRef = useRef<WebSocket | null>(null);
+  const liveSessionRef = useRef<Session | null>(null);
   const liveReadyRef = useRef<boolean>(false);
   const liveAwaitingToolReplyRef = useRef<boolean>(false);
   const liveToolTimeoutRef = useRef<number | null>(null);
@@ -340,17 +359,11 @@ export function JarvisConsole({
     liveReadyRef.current = false;
     liveAwaitingToolReplyRef.current = false;
 
-    if (liveWsRef.current) {
-      const ws = liveWsRef.current;
-      liveWsRef.current = null;
+    if (liveSessionRef.current) {
+      const session = liveSessionRef.current;
+      liveSessionRef.current = null;
       try {
-        ws.onopen = null;
-        ws.onmessage = null;
-        ws.onerror = null;
-        ws.onclose = null;
-        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-          ws.close(1000, 'Session ended');
-        }
+        void Promise.resolve(session.close()).catch(() => {});
       } catch {
         // ignore
       }
@@ -515,7 +528,7 @@ export function JarvisConsole({
       unlockAudioOutput();
 
       // If a Live Voice session is actively open, route turn straight through it
-      if (liveWsRef.current && liveWsRef.current.readyState === WebSocket.OPEN) {
+      if (liveSessionRef.current && liveReadyRef.current) {
         appendMessage({
           id: `user-${Date.now()}`,
           role: 'user',
@@ -523,7 +536,11 @@ export function JarvisConsole({
           timestamp: Date.now(),
         });
         setStatus('thinking');
-        liveWsRef.current.send(JSON.stringify({ type: 'text', text: cleaned }));
+        try {
+          liveSessionRef.current.sendRealtimeInput({ text: cleaned });
+        } catch {
+          // ignore if session just closed
+        }
         return;
       }
 
@@ -601,7 +618,7 @@ export function JarvisConsole({
     [appendMessage, playJarvisReplyAudio, stopUnaryPlayback],
   );
 
-  // --- LIVE VOICE MODE (Gemini Live API over WebSocket) ---
+  // --- LIVE VOICE MODE (Gemini Live API, browser-direct via ephemeral token) ---
   const startLiveVoiceCall = async () => {
     if (liveActive || liveConnecting) {
       stopLiveSession();
@@ -673,7 +690,7 @@ export function JarvisConsole({
     const player = new LiveAudioPlayer(amplitudeRef, (isSpeaking) => {
       if (isSpeaking) logStage('playback-started');
       setStatus((prev) => {
-        if (!liveWsRef.current) return 'idle';
+        if (!liveSessionRef.current) return 'idle';
         if (isSpeaking) return 'speaking';
         if (liveAwaitingToolReplyRef.current) return 'thinking';
         return prev === 'speaking' ? 'listening' : prev;
@@ -721,18 +738,48 @@ export function JarvisConsole({
       return;
     }
 
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${proto}//${window.location.host}/api/jarvis/live`;
-    logStage('ws-connecting', { url: wsUrl });
-    const ws = new WebSocket(wsUrl);
-    liveWsRef.current = ws;
-    liveReadyRef.current = false;
-    liveAwaitingToolReplyRef.current = false;
-    firstLiveAudioSentRef.current = false;
-    firstLiveAudioReceivedRef.current = false;
+    // Browser-direct Gemini Live via ephemeral token (serverless functions cannot hold WebSockets)
+    logStage('live-token-requesting');
+    let liveToken: string;
+    try {
+      const tokenResult = await fetchLiveToken();
+      liveToken = tokenResult.token;
+      logStage('live-token-granted', {
+        model: tokenResult.model,
+        expiresInSeconds: tokenResult.expiresInSeconds,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logStage('failed-live-token', { message });
+      player.close();
+      livePlayerRef.current = null;
+      if (captureCtx && captureCtx.state !== 'closed') {
+        captureCtx.close().catch(() => {});
+      }
+      captureAudioCtxRef.current = null;
+      appendMessage({
+        id: `live-token-${Date.now()}`,
+        role: 'jarvis',
+        text: message,
+        timestamp: Date.now(),
+        isError: true,
+      });
+      setLiveConnecting(false);
+      setStatus('idle');
+      return;
+    }
+
+    const systemInstruction = buildJarvisLiveSystemInstruction(
+      formatTasksContextBlock(
+        sanitizeTasksSummary(buildTasksPayload()),
+        new Date().toString(),
+      ),
+    );
+
+    let liveSession: Session | null = null;
 
     const connectTimeout = window.setTimeout(() => {
-      if (!liveReadyRef.current && liveWsRef.current === ws) {
+      if (!liveReadyRef.current && liveSessionRef.current === liveSession) {
         appendMessage({
           id: `live-timeout-${Date.now()}`,
           role: 'jarvis',
@@ -744,166 +791,130 @@ export function JarvisConsole({
       }
     }, 12000);
 
-    ws.onopen = () => {
-      logStage('ws-open-sending-init');
-      ws.send(
-        JSON.stringify({
-          type: 'init',
-          tasksSummary: buildTasksPayload(),
-          localTime: new Date().toString(),
-        }),
-      );
+    const handleLiveServerMessage = (message: LiveServerMessage) => {
+      if (liveSessionRef.current !== liveSession || !liveSession) return;
 
-      if (captureCtx && mediaStreamRef.current) {
-        try {
-          if (captureCtx.state === 'suspended') {
-            captureCtx.resume().catch(() => {});
-          }
-          const source = captureCtx.createMediaStreamSource(mediaStreamRef.current);
-          captureSourceRef.current = source;
-
-          const processor = captureCtx.createScriptProcessor(4096, 1, 1);
-          scriptProcessorRef.current = processor;
-
-          // Zero-gain node prevents mic loopback echo into local speakers
-          const silentGain = captureCtx.createGain();
-          silentGain.gain.value = 0;
-          captureSilentGainRef.current = silentGain;
-
-          source.connect(processor);
-          processor.connect(silentGain);
-          silentGain.connect(captureCtx.destination);
-
-          logStage('audio-capture-started', { captureSampleRate: captureCtx.sampleRate });
-
-          processor.onaudioprocess = (ev) => {
-            if (!liveWsRef.current || liveWsRef.current.readyState !== WebSocket.OPEN) return;
-            const channel = ev.inputBuffer.getChannelData(0);
-            const level = computeRmsLevel(channel);
-            updateMicMeter(level);
-
-            const jarvisSpeaking = livePlayerRef.current?.isSpeaking() ?? false;
-            if (!jarvisSpeaking && (!livePlayerRef.current || amplitudeRef.current < level)) {
-              amplitudeRef.current = level;
-            }
-
-            // Do not stream audio until session signals ready; attenuate speaker echo unless louder barge-in
-            if (!liveReadyRef.current) return;
-            if (jarvisSpeaking && level < 0.16) return;
-
-            const pcm16 = resampleFloat32ToInt16(channel, captureCtx.sampleRate, LIVE_INPUT_SAMPLE_RATE);
-            if (pcm16.length > 0) {
-              liveWsRef.current.send(
-                JSON.stringify({
-                  type: 'audio',
-                  data: int16ToBase64(pcm16),
-                }),
-              );
-              if (!firstLiveAudioSentRef.current) {
-                firstLiveAudioSentRef.current = true;
-                logStage('audio-sent', {
-                  captureSampleRate: captureCtx.sampleRate,
-                  upsampledTo: LIVE_INPUT_SAMPLE_RATE,
-                });
-              }
-            }
-          };
-        } catch (err) {
-          window.clearTimeout(connectTimeout);
-          logStage('failed-capture-init', { message: err instanceof Error ? err.message : String(err) });
-          appendMessage({
-            id: `jarvis-ctx-err-${Date.now()}`,
-            role: 'jarvis',
-            text: 'Could not initialize browser audio capture for Live Voice. Switching to Push-to-Talk instead.',
-            timestamp: Date.now(),
-            isError: true,
-          });
-          stopLiveSession();
-          setVoiceMode('ptt');
-        }
-      } else {
+      if (message.setupComplete) {
         window.clearTimeout(connectTimeout);
-        logStage('failed-capture-unavailable');
-        appendMessage({
-          id: `jarvis-ctx-null-${Date.now()}`,
-          role: 'jarvis',
-          text: 'Web Audio capture is unavailable in this browser. Switching to Push-to-Talk instead.',
-          timestamp: Date.now(),
-          isError: true,
-        });
-        stopLiveSession();
-        setVoiceMode('ptt');
+        logStage('ai-session-ready', { model: LIVE_MODEL_ID, via: 'ephemeral-token' });
+        liveReadyRef.current = true;
+        setLiveConnecting(false);
+        setLiveActive(true);
+        setStatus('listening');
+        playJarvisChime('activate');
+        return;
       }
-    };
 
-    ws.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data as string) as {
-          type?: string;
-          text?: string;
-          data?: string;
-          sampleRate?: number;
-          actions?: JarvisAction[];
-          message?: string;
-        };
+      const content = message.serverContent;
 
-        if (payload.type === 'ready') {
-          window.clearTimeout(connectTimeout);
-          logStage('ai-session-ready');
-          liveReadyRef.current = true;
-          setLiveConnecting(false);
-          setLiveActive(true);
-          setStatus('listening');
-          playJarvisChime('activate');
-          return;
+      if (content?.inputTranscription?.text) {
+        liveUserDraftRef.current += content.inputTranscription.text;
+        setLiveUserCaption(liveUserDraftRef.current.trim());
+      }
+
+      if (content?.outputTranscription?.text) {
+        liveAwaitingToolReplyRef.current = false;
+        if (liveToolTimeoutRef.current !== null) {
+          window.clearTimeout(liveToolTimeoutRef.current);
+          liveToolTimeoutRef.current = null;
         }
-
-        if (payload.type === 'input_transcript' && payload.text) {
-          liveUserDraftRef.current += payload.text;
-          setLiveUserCaption(liveUserDraftRef.current.trim());
-          return;
+        if (liveUserDraftRef.current.trim() && !liveJarvisDraftRef.current) {
+          const committedUser = liveUserDraftRef.current.trim();
+          liveUserDraftRef.current = '';
+          setLiveUserCaption('');
+          appendMessage({
+            id: `live-user-${Date.now()}`,
+            role: 'user',
+            text: committedUser,
+            timestamp: Date.now(),
+          });
         }
+        liveJarvisDraftRef.current += content.outputTranscription.text;
+        setLiveJarvisCaption(liveJarvisDraftRef.current.trim());
+      }
 
-        if (payload.type === 'output_transcript' && payload.text) {
+      const modelTurnParts = content?.modelTurn?.parts ?? [];
+      for (const part of modelTurnParts) {
+        if (part.inlineData?.data) {
           liveAwaitingToolReplyRef.current = false;
           if (liveToolTimeoutRef.current !== null) {
             window.clearTimeout(liveToolTimeoutRef.current);
             liveToolTimeoutRef.current = null;
           }
-          if (liveUserDraftRef.current.trim() && !liveJarvisDraftRef.current) {
-            const committedUser = liveUserDraftRef.current.trim();
-            liveUserDraftRef.current = '';
-            setLiveUserCaption('');
-            appendMessage({
-              id: `live-user-${Date.now()}`,
-              role: 'user',
-              text: committedUser,
-              timestamp: Date.now(),
-            });
-          }
-          liveJarvisDraftRef.current += payload.text;
-          setLiveJarvisCaption(liveJarvisDraftRef.current.trim());
-          return;
-        }
-
-        if (payload.type === 'audio' && payload.data) {
-          liveAwaitingToolReplyRef.current = false;
-          if (liveToolTimeoutRef.current !== null) {
-            window.clearTimeout(liveToolTimeoutRef.current);
-            liveToolTimeoutRef.current = null;
-          }
+          const rateMatch = /rate=(\d+)/.exec(part.inlineData.mimeType ?? '');
           if (voiceEnabledRef.current && livePlayerRef.current) {
             if (!firstLiveAudioReceivedRef.current) {
               firstLiveAudioReceivedRef.current = true;
-              logStage('response-audio-received', { sampleRate: payload.sampleRate ?? null });
+              logStage('response-audio-received', {
+                sampleRate: rateMatch ? Number(rateMatch[1]) : null,
+              });
             }
-            livePlayerRef.current.enqueuePcmBase64(payload.data, payload.sampleRate);
+            livePlayerRef.current.enqueuePcmBase64(
+              part.inlineData.data,
+              rateMatch ? Number(rateMatch[1]) : undefined,
+            );
           }
+        }
+      }
+
+      if (content?.interrupted) {
+        liveAwaitingToolReplyRef.current = false;
+        livePlayerRef.current?.interrupt();
+        commitLiveTurnDrafts(true);
+        setStatus('listening');
+      }
+
+      if (content?.turnComplete) {
+        // Gemini Live emits an immediate turn_complete right after emitting toolCall before speaking
+        if (
+          liveAwaitingToolReplyRef.current &&
+          !liveJarvisDraftRef.current.trim() &&
+          !livePlayerRef.current?.isSpeaking()
+        ) {
           return;
         }
+        liveAwaitingToolReplyRef.current = false;
+        commitLiveTurnDrafts(true);
+        setStatus((prev) => (prev === 'speaking' ? prev : 'listening'));
+        return;
+      }
 
-        if (payload.type === 'actions' && Array.isArray(payload.actions)) {
-          const summaries = onApplyActionsRef.current(payload.actions);
+      const calls = message.toolCall?.functionCalls ?? [];
+      if (calls.length > 0) {
+        const actionsToApply: JarvisAction[] = [];
+        const functionResponses = calls.map((call) => {
+          const args = (call.args ?? {}) as Record<string, unknown>;
+          if (
+            call.name === 'add_task' ||
+            call.name === 'move_task' ||
+            call.name === 'complete_task' ||
+            call.name === 'delete_task' ||
+            call.name === 'set_reminder'
+          ) {
+            actionsToApply.push({
+              type: call.name,
+              title: typeof args.title === 'string' ? args.title : undefined,
+              quadrant: typeof args.quadrant === 'string' ? (args.quadrant as QuadrantId) : undefined,
+              targetTaskTitle:
+                typeof args.targetTaskTitle === 'string' ? args.targetTaskTitle : undefined,
+              reminderMinutesFromNow:
+                typeof args.reminderMinutesFromNow === 'number'
+                  ? args.reminderMinutesFromNow
+                  : undefined,
+              reminderIso:
+                typeof args.reminderIso === 'string' ? args.reminderIso : undefined,
+              notes: typeof args.notes === 'string' ? args.notes : undefined,
+            });
+          }
+          return {
+            id: call.id,
+            name: call.name,
+            response: { ok: true },
+          };
+        });
+
+        if (actionsToApply.length > 0) {
+          const summaries = onApplyActionsRef.current(actionsToApply);
           if (summaries.length > 0) {
             livePendingSummariesRef.current.push(...summaries);
             playJarvisChime('confirm');
@@ -918,102 +929,186 @@ export function JarvisConsole({
               liveAwaitingToolReplyRef.current = false;
               commitLiveTurnDrafts(true);
               setStatus((prev) =>
-                liveWsRef.current && prev === 'thinking' ? 'listening' : prev,
+                liveSessionRef.current && prev === 'thinking' ? 'listening' : prev,
               );
             }
           }, 5000);
-          return;
         }
 
-        if (payload.type === 'interrupted') {
-          liveAwaitingToolReplyRef.current = false;
-          livePlayerRef.current?.interrupt();
-          commitLiveTurnDrafts(true);
-          setStatus('listening');
-          return;
+        try {
+          liveSession.sendToolResponse({ functionResponses });
+        } catch {
+          // ignore if session already closed
         }
+      }
+    };
 
-        if (payload.type === 'turn_complete') {
-          // Gemini Live emits an immediate turn_complete right after emitting toolCall before speaking
-          if (
-            liveAwaitingToolReplyRef.current &&
-            !liveJarvisDraftRef.current.trim() &&
-            !livePlayerRef.current?.isSpeaking()
-          ) {
-            return;
-          }
-          liveAwaitingToolReplyRef.current = false;
-          commitLiveTurnDrafts(true);
-          setStatus((prev) => (prev === 'speaking' ? prev : 'listening'));
-          return;
-        }
-
-        if (payload.type === 'error') {
+    try {
+      logStage('ws-connecting', { model: LIVE_MODEL_ID, apiVersion: LIVE_CONNECT_API_VERSION });
+      const session = await connectJarvisLiveBrowser(liveToken, systemInstruction, {
+        onMessage: handleLiveServerMessage,
+        onError: (e) => {
           window.clearTimeout(connectTimeout);
-          logStage('ai-session-error', { message: payload.message || 'unknown' });
+          const message = extractCleanErrorMessage(e, 'Live voice connection error.');
+          logStage('ai-session-error', { message });
+          if (liveSessionRef.current !== session) return;
           appendMessage({
             id: `live-err-${Date.now()}`,
             role: 'jarvis',
-            text:
-              payload.message ||
-              'Live voice session encountered an issue. Try Push-to-Talk or reconnect.',
+            text: message || 'Live voice session encountered an issue. Try Push-to-Talk or reconnect.',
             timestamp: Date.now(),
             isError: true,
           });
           stopLiveSession();
-          return;
-        }
-
-        if (payload.type === 'closed') {
+        },
+        onClose: (ev) => {
           window.clearTimeout(connectTimeout);
+          logStage('ws-closed', { code: ev.code, reason: ev.reason || 'none' });
+          if (liveSessionRef.current !== session) return;
+          const failedHandshake = !liveReadyRef.current;
+          const abnormalClose = ev.code !== 1000 && ev.code !== 1005;
+          if (failedHandshake || abnormalClose) {
+            appendMessage({
+              id: `live-ws-closed-${Date.now()}`,
+              role: 'jarvis',
+              text: failedHandshake
+                ? 'Could not establish a Live Voice stream. Switch to Push-to-Talk mode or try again.'
+                : ev.reason
+                  ? `Live voice call disconnected (code ${ev.code}: ${ev.reason}).`
+                  : `Live voice call disconnected (code ${ev.code}).`,
+              timestamp: Date.now(),
+              isError: true,
+            });
+          }
           stopLiveSession();
-        }
-      } catch {
-        // ignore malformed websocket payload
-      }
-    };
+        },
+      });
 
-    ws.onerror = () => {
+      if (liveSessionRef.current !== liveSession) {
+        // stopLiveSession() ran while connecting; discard the new session
+        window.clearTimeout(connectTimeout);
+        try {
+          void Promise.resolve(session.close()).catch(() => {});
+        } catch {
+          // ignore
+        }
+        return;
+      }
+      liveSession = session;
+      liveSessionRef.current = session;
+      logStage('ws-open-attaching-capture');
+    } catch (err) {
       window.clearTimeout(connectTimeout);
-      logStage('ws-error');
-      if (liveWsRef.current === ws) {
+      const message = extractCleanErrorMessage(err, 'Live voice connection failed.');
+      logStage('failed-live-connect', { message });
+      livePlayerRef.current?.close();
+      livePlayerRef.current = null;
+      appendMessage({
+        id: `live-connect-err-${Date.now()}`,
+        role: 'jarvis',
+        text: message,
+        timestamp: Date.now(),
+        isError: true,
+      });
+      setLiveConnecting(false);
+      setStatus('idle');
+      return;
+    }
+
+    if (captureCtx && mediaStreamRef.current) {
+      try {
+        if (captureCtx.state === 'suspended') {
+          captureCtx.resume().catch(() => {});
+        }
+        const source = captureCtx.createMediaStreamSource(mediaStreamRef.current);
+        captureSourceRef.current = source;
+
+        const processor = captureCtx.createScriptProcessor(4096, 1, 1);
+        scriptProcessorRef.current = processor;
+
+        // Zero-gain node prevents mic loopback echo into local speakers
+        const silentGain = captureCtx.createGain();
+        silentGain.gain.value = 0;
+        captureSilentGainRef.current = silentGain;
+
+        source.connect(processor);
+        processor.connect(silentGain);
+        silentGain.connect(captureCtx.destination);
+
+        logStage('audio-capture-started', { captureSampleRate: captureCtx.sampleRate });
+
+        processor.onaudioprocess = (ev) => {
+          if (!liveSessionRef.current) return;
+          const channel = ev.inputBuffer.getChannelData(0);
+          const level = computeRmsLevel(channel);
+          updateMicMeter(level);
+
+          const jarvisSpeaking = livePlayerRef.current?.isSpeaking() ?? false;
+          if (!jarvisSpeaking && (!livePlayerRef.current || amplitudeRef.current < level)) {
+            amplitudeRef.current = level;
+          }
+
+          // Do not stream audio until session signals ready; attenuate speaker echo unless louder barge-in
+          if (!liveReadyRef.current) return;
+          if (jarvisSpeaking && level < 0.16) return;
+
+          const pcm16 = resampleFloat32ToInt16(channel, captureCtx.sampleRate, LIVE_INPUT_SAMPLE_RATE);
+          if (pcm16.length > 0) {
+            try {
+              liveSessionRef.current.sendRealtimeInput({
+                audio: {
+                  data: int16ToBase64(pcm16),
+                  mimeType: `audio/pcm;rate=${LIVE_INPUT_SAMPLE_RATE}`,
+                },
+              });
+            } catch {
+              return;
+            }
+            if (!firstLiveAudioSentRef.current) {
+              firstLiveAudioSentRef.current = true;
+              logStage('audio-sent', {
+                captureSampleRate: captureCtx.sampleRate,
+                upsampledTo: LIVE_INPUT_SAMPLE_RATE,
+              });
+            }
+          }
+        };
+      } catch (err) {
+        window.clearTimeout(connectTimeout);
+        logStage('failed-capture-init', { message: err instanceof Error ? err.message : String(err) });
         appendMessage({
-          id: `live-ws-err-${Date.now()}`,
+          id: `jarvis-ctx-err-${Date.now()}`,
           role: 'jarvis',
-          text: 'Live voice WebSocket connection dropped. Try Push-to-Talk mode for instant turn-based voice.',
+          text: 'Could not initialize browser audio capture for Live Voice. Switching to Push-to-Talk instead.',
           timestamp: Date.now(),
           isError: true,
         });
         stopLiveSession();
+        setVoiceMode('ptt');
       }
-    };
-
-    ws.onclose = (ev) => {
+    } else {
       window.clearTimeout(connectTimeout);
-      logStage('ws-closed', { code: ev.code, reason: ev.reason || 'none' });
-      if (liveWsRef.current === ws) {
-        const failedHandshake = !liveReadyRef.current;
-        const abnormalClose = ev.code !== 1000 && ev.code !== 1005;
-        if (failedHandshake || abnormalClose) {
-          appendMessage({
-            id: `live-ws-closed-${Date.now()}`,
-            role: 'jarvis',
-            text: failedHandshake
-              ? 'Could not establish a Live Voice stream. Switch to Push-to-Talk mode or try again.'
-              : `Live voice call disconnected (code ${ev.code}).`,
-            timestamp: Date.now(),
-            isError: true,
-          });
-        }
-        stopLiveSession();
-      }
-    };
+      logStage('failed-capture-unavailable');
+      appendMessage({
+        id: `jarvis-ctx-null-${Date.now()}`,
+        role: 'jarvis',
+        text: 'Web Audio capture is unavailable in this browser. Switching to Push-to-Talk instead.',
+        timestamp: Date.now(),
+        isError: true,
+      });
+      stopLiveSession();
+      setVoiceMode('ptt');
+    }
   };
 
   const finishLiveUserTurn = () => {
-    if (!liveWsRef.current || liveWsRef.current.readyState !== WebSocket.OPEN) return;
+    if (!liveSessionRef.current) return;
     setStatus('thinking');
-    liveWsRef.current.send(JSON.stringify({ type: 'audio_end' }));
+    try {
+      liveSessionRef.current.sendRealtimeInput({ audioStreamEnd: true });
+    } catch {
+      // ignore if session just closed
+    }
   };
 
   // --- PUSH-TO-TALK MODE (Direct 16kHz PCM WAV + MediaRecorder backup -> /api/jarvis/voice-turn) ---

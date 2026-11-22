@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Activity, CheckCircle2, Loader2, MinusCircle, XCircle } from 'lucide-react';
 import { int16ToBase64 } from '../utils/pcm';
+import { fetchLiveToken, probeLiveRoundTrip } from '../utils/geminiLiveBrowser';
 
 type CheckState = 'idle' | 'running' | 'pass' | 'fail' | 'skipped';
 
@@ -13,15 +14,12 @@ interface SelfTestCheck {
 
 const INITIAL_CHECKS: SelfTestCheck[] = [
   { id: 'key', label: 'Server GEMINI_API_KEY set', state: 'idle' },
-  { id: 'live', label: 'Server opens Live session (gemini-3.8-live)', state: 'idle' },
+  { id: 'live', label: 'Server mints ephemeral Live token', state: 'idle' },
   { id: 'mic', label: 'Microphone permission granted', state: 'idle' },
   { id: 'ctx', label: 'AudioContext created and resumed', state: 'idle' },
-  { id: 'ws', label: 'Browser WebSocket to /api/jarvis/live opened', state: 'idle' },
+  { id: 'ws', label: 'Browser connects directly to Gemini Live', state: 'idle' },
   { id: 'roundtrip', label: 'Test audio sent, response received', state: 'idle' },
 ];
-
-const CONNECT_TIMEOUT_MS = 12000;
-const ROUNDTRIP_TIMEOUT_MS = 15000;
 
 function logSelfTest(...args: unknown[]) {
   console.log('[Jarvis Voice] self-test:', ...args);
@@ -98,6 +96,7 @@ export function VoiceSelfTest() {
         update('key', { state: 'fail', detail: 'No - GEMINI_API_KEY is not set on the server' });
         logSelfTest('key: not configured');
         skip('live', 'Skipped: no API key on server');
+        skip('ws', 'Skipped: no API key on server');
         skip('roundtrip', 'Skipped: no API key on server');
         setRunning(false);
         return;
@@ -107,39 +106,41 @@ export function VoiceSelfTest() {
       update('key', { state: 'fail', detail: message });
       logSelfTest('key: request failed', message);
       skip('live', 'Skipped: key status request failed');
+      skip('ws', 'Skipped: key status request failed');
       skip('roundtrip', 'Skipped: key status request failed');
       setRunning(false);
       return;
     }
 
     update('live', { state: 'running' });
-    let serverLiveOk = false;
+    let tokenOk = false;
     try {
       const res = await fetch('/api/jarvis/selftest/live', { method: 'POST' });
       const data = (await res.json()) as {
         ok?: boolean;
         error?: string;
         model?: string;
-        apiVersion?: string | null;
+        mode?: string;
       };
       if (data.ok) {
-        serverLiveOk = true;
+        tokenOk = true;
         update('live', {
           state: 'pass',
-          detail: `Connected (${data.model || 'gemini-3.8-live'} via ${data.apiVersion || 'default'})`,
+          detail: `Token minted (${data.model || 'gemini-3.8-live'})`,
         });
-        logSelfTest('server live session: ok', data.apiVersion);
+        logSelfTest('server live token: ok', data.mode);
       } else {
-        update('live', { state: 'fail', detail: data.error || 'Live session failed' });
-        logSelfTest('server live session: fail', data.error);
+        update('live', { state: 'fail', detail: data.error || 'Live token request failed' });
+        logSelfTest('server live token: fail', data.error);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Live status request failed';
       update('live', { state: 'fail', detail: message });
-      logSelfTest('server live session: fail', message);
+      logSelfTest('server live token: fail', message);
     }
-    if (!serverLiveOk) {
-      skip('roundtrip', 'Skipped: server cannot open a Live session');
+    if (!tokenOk) {
+      skip('ws', 'Skipped: server cannot mint a Live token');
+      skip('roundtrip', 'Skipped: server cannot mint a Live token');
     }
 
     update('mic', { state: 'running' });
@@ -196,126 +197,56 @@ export function VoiceSelfTest() {
     }
 
     update('ws', { state: 'running' });
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${proto}//${window.location.host}/api/jarvis/live`);
-    let wsOpened = false;
-    let sessionReady = false;
-    let responseReceived = false;
-    let connectTimer = 0;
-    let roundtripTimer = 0;
-
-    const finishWs = () => {
-      window.clearTimeout(connectTimer);
-      window.clearTimeout(roundtripTimer);
-      setRunning(false);
-      logSelfTest('finished', { wsOpened, sessionReady, responseReceived });
-    };
-
-    const failRoundtrip = (detail: string) => {
-      if (!responseReceived) {
-        update('roundtrip', { state: 'fail', detail });
-      }
-    };
-
-    ws.onopen = () => {
-      wsOpened = true;
-      update('ws', { state: 'pass', detail: 'Opened' });
-      logSelfTest('ws: open');
-      ws.send(JSON.stringify({ type: 'init', tasksSummary: [], localTime: new Date().toString() }));
-      connectTimer = window.setTimeout(() => {
-        update('ws', { state: 'fail', detail: 'Opened but session not ready within 12s' });
-        failRoundtrip('Session not ready within 12s');
-        try {
-          ws.close(1000, 'self-test timeout');
-        } catch {
-          // ignore
-        }
-      }, CONNECT_TIMEOUT_MS);
-    };
-
-    ws.onmessage = (ev) => {
-      let payload: { type?: string; text?: string; data?: string; message?: string };
+    if (tokenOk) {
+      let token: string | null = null;
       try {
-        payload = JSON.parse(ev.data as string) as typeof payload;
-      } catch {
+        const liveToken = await fetchLiveToken();
+        token = liveToken.token;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Live token request failed';
+        update('ws', { state: 'fail', detail: message });
+        logSelfTest('browser live: token fail', message);
+        skip('roundtrip', 'Skipped: could not fetch Live token');
+        setRunning(false);
         return;
       }
 
-      if (payload.type === 'ready') {
-        sessionReady = true;
-        window.clearTimeout(connectTimer);
-        logSelfTest('ws: session ready');
-        ws.send(JSON.stringify({ type: 'audio', data: createTonePcmBase64() }));
-        ws.send(JSON.stringify({ type: 'audio_end' }));
-        logSelfTest('audio: test tone sent (16 kHz PCM)');
-        roundtripTimer = window.setTimeout(() => {
-          failRoundtrip('No response within 15s after test audio');
-          try {
-            ws.close(1000, 'self-test timeout');
-          } catch {
-            // ignore
-          }
-        }, ROUNDTRIP_TIMEOUT_MS);
-        return;
-      }
-
-      if (payload.type === 'audio' && payload.data) {
-        if (!responseReceived) {
-          responseReceived = true;
-          update('roundtrip', { state: 'pass', detail: 'Response audio received' });
-          logSelfTest('roundtrip: response audio received');
-        }
-        return;
-      }
-
-      if (payload.type === 'output_transcript' && payload.text) {
-        if (!responseReceived) {
-          responseReceived = true;
+      try {
+        const result = await probeLiveRoundTrip(token!, createTonePcmBase64());
+        if (result.ok) {
+          update('ws', { state: 'pass', detail: 'Connected directly (v1beta)' });
+          logSelfTest('browser live: connect ok');
           update('roundtrip', {
             state: 'pass',
-            detail: `Response received (text): "${payload.text.slice(0, 80)}"`,
+            detail: result.receivedAudio
+              ? 'Response audio received'
+              : `Response received (text)${result.receivedText ? '' : ' (indirect)'}`,
           });
-          logSelfTest('roundtrip: output transcript received');
+          logSelfTest('roundtrip: response received', result);
+        } else if (result.error && result.error.startsWith('No response')) {
+          update('ws', { state: 'pass', detail: 'Connected directly (v1beta)' });
+          logSelfTest('browser live: connect ok, no response');
+          update('roundtrip', { state: 'fail', detail: result.error });
+          logSelfTest('roundtrip: fail', result.error);
+        } else {
+          update('ws', {
+            state: 'fail',
+            detail: result.closeCode !== null
+              ? `Connection failed (close code ${result.closeCode})${result.error ? `: ${result.error}` : ''}`
+              : result.error || 'Connection failed',
+          });
+          logSelfTest('browser live: connect fail', result.error, result.closeCode);
+          skip('roundtrip', 'Skipped: browser Live connect failed');
         }
-        return;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Browser Live probe crashed';
+        update('ws', { state: 'fail', detail: message });
+        logSelfTest('browser live: probe error', err);
+        skip('roundtrip', 'Skipped: browser Live probe crashed');
       }
-
-      if (payload.type === 'error') {
-        if (!sessionReady) {
-          update('ws', { state: 'fail', detail: 'Server error before session ready' });
-        }
-        failRoundtrip(payload.message || 'Live session error');
-        logSelfTest('ws: server error', payload.message);
-        try {
-          ws.close(1000, 'self-test');
-        } catch {
-          // ignore
-        }
-      }
-    };
-
-    ws.onerror = () => {
-      if (!wsOpened) {
-        update('ws', { state: 'fail', detail: 'Connection failed' });
-      }
-      if (!sessionReady) {
-        failRoundtrip('Skipped: WebSocket failed');
-        update('roundtrip', { state: 'skipped', detail: 'Skipped: WebSocket failed' });
-        finishWs();
-      }
-    };
-
-    ws.onclose = (ev) => {
-      if (!wsOpened) {
-        update('ws', { state: 'fail', detail: `Connection failed (close code ${ev.code})` });
-      } else if (!sessionReady && ev.code !== 1000) {
-        update('ws', { state: 'fail', detail: `Closed before ready (close code ${ev.code})` });
-      }
-      if (!responseReceived) {
-        failRoundtrip(`WebSocket closed (code ${ev.code}) before any response`);
-      }
-      finishWs();
-    };
+    }
+    setRunning(false);
+    logSelfTest('finished');
   };
 
   useEffect(() => {
@@ -380,3 +311,4 @@ export function VoiceSelfTest() {
     </div>
   );
 }
+
